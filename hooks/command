@@ -56,25 +56,6 @@ if [ "${MODE}" != "deploy" ] && [ "${MODE}" != "rollback" ]; then
   exit 1
 fi
 
-# Set kubeconfig if provided
-if [ -n "${KUBECONFIG}" ]; then
-  export KUBECONFIG="${KUBECONFIG}"
-  echo "Using KUBECONFIG environment variable: ${KUBECONFIG}"
-else
-  echo "No KUBECONFIG environment variable set"
-fi
-
-# Debug kubeconfig file existence
-echo "Checking kubeconfig file: ${KUBECONFIG}"
-if [ -f "${KUBECONFIG}" ]; then
-  echo "✅ Kubeconfig file exists at: ${KUBECONFIG}"
-  ls -la "${KUBECONFIG}"
-else
-  echo "❌ Kubeconfig file not found at: ${KUBECONFIG}"
-  echo "Current working directory: $(pwd)"
-  echo "Available files:"
-  find . -name "*config*" -type f 2>/dev/null || echo "No config files found"
-fi
 
 echo "🚀 Helm Deployment Plugin"
 echo "Mode: ${MODE}"
@@ -106,30 +87,6 @@ case "${MODE}" in
     # Capture current version before deployment
     echo "📋 Capturing current deployment state..."
     CURRENT_VERSION=""
-    
-    # Test helm connectivity first
-    echo "🔍 Testing helm connectivity..."
-    HELM_VERSION_CMD="helm version"
-    if [ -n "${KUBECONFIG}" ]; then
-      HELM_VERSION_CMD="${HELM_VERSION_CMD} --kubeconfig ${KUBECONFIG}"
-    fi
-    if ! eval "${HELM_VERSION_CMD}" > /dev/null 2>&1; then
-      echo "⚠️  Warning: Helm connectivity test failed, continuing anyway..."
-    else
-      echo "✅ Helm is available"
-    fi
-    
-    # Test kubectl connectivity
-    echo "🔍 Testing kubectl connectivity..."
-    KUBECTL_CMD="kubectl cluster-info"
-    if [ -n "${KUBECONFIG}" ]; then
-      KUBECTL_CMD="${KUBECTL_CMD} --kubeconfig ${KUBECONFIG}"
-    fi
-    if ! eval "${KUBECTL_CMD}" > /dev/null 2>&1; then
-      echo "⚠️  Warning: kubectl connectivity test failed, continuing anyway..."
-    else
-      echo "✅ kubectl is available"
-    fi
     
     # Try to list releases with better error handling
     echo "🔍 Checking for existing release: ${RELEASE} in namespace: ${NAMESPACE}"
