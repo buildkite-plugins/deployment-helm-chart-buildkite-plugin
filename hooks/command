@@ -1,0 +1,264 @@
+#!/bin/bash
+
+set -euo pipefail
+
+DIR="$(cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd)"
+
+# shellcheck source=lib/plugin.bash
+. "$DIR/../lib/plugin.bash"
+
+# Check if required tools are installed
+if ! command -v helm &> /dev/null; then
+  echo "❌ Error: helm is not installed or not in PATH"
+  exit 1
+fi
+
+if ! command -v jq &> /dev/null; then
+  echo "❌ Error: jq is not installed or not in PATH"
+  exit 1
+fi
+
+# Read configuration
+MODE=$(plugin_read_config MODE "")
+CHART=$(plugin_read_config CHART "")
+RELEASE=$(plugin_read_config RELEASE "")
+NAMESPACE=$(plugin_read_config NAMESPACE "default")
+KUBECONFIG=$(plugin_read_config KUBECONFIG "")
+TIMEOUT=$(plugin_read_config TIMEOUT "300s")
+WAIT=$(plugin_read_config WAIT "true")
+ATOMIC=$(plugin_read_config ATOMIC "true")
+CREATE_NAMESPACE=$(plugin_read_config CREATE_NAMESPACE "false")
+DRY_RUN=$(plugin_read_config DRY_RUN "false")
+REVISION=$(plugin_read_config REVISION "")
+REPO_URL=$(plugin_read_config REPO_URL "")
+REPO_NAME=$(plugin_read_config REPO_NAME "")
+FORCE=$(plugin_read_config FORCE "false")
+HISTORY_MAX=$(plugin_read_config HISTORY_MAX "10")
+
+# Validate required configuration
+if [ -z "${MODE}" ]; then
+  echo "❌ Error: 'mode' is required (deploy or rollback)"
+  exit 1
+fi
+
+if [ -z "${RELEASE}" ]; then
+  echo "❌ Error: 'release' is required"
+  exit 1
+fi
+
+if [ "${MODE}" = "deploy" ] && [ -z "${CHART}" ]; then
+  echo "❌ Error: 'chart' is required for deploy mode"
+  exit 1
+fi
+
+if [ "${MODE}" != "deploy" ] && [ "${MODE}" != "rollback" ]; then
+  echo "❌ Error: 'mode' must be either 'deploy' or 'rollback'"
+  exit 1
+fi
+
+
+echo "🚀 Helm Deployment Plugin"
+echo "Mode: ${MODE}"
+echo "Release: ${RELEASE}"
+echo "Namespace: ${NAMESPACE}"
+
+# Build metadata keys
+METADATA_CURRENT_VERSION="deployment:helm_chart:${RELEASE}:current_version"
+METADATA_RESULT="deployment:helm_chart:${RELEASE}:result"
+METADATA_TIMESTAMP="deployment:helm_chart:${RELEASE}:timestamp"
+
+case "${MODE}" in
+  "deploy")
+    echo "Chart: ${CHART}"
+    
+    # Add Helm repository if specified
+    if [ -n "${REPO_URL}" ] && [ -n "${REPO_NAME}" ]; then
+      echo "📦 Adding Helm repository: ${REPO_NAME} -> ${REPO_URL}"
+      if helm repo add "${REPO_NAME}" "${REPO_URL}"; then
+        echo "✅ Repository added successfully"
+        echo "🔄 Updating repository index..."
+        helm repo update
+      else
+        echo "❌ Failed to add repository"
+        exit 1
+      fi
+    fi
+    
+    # Capture current version before deployment
+    echo "📋 Capturing current deployment state..."
+    CURRENT_VERSION=""
+    
+    # Try to list releases with better error handling
+    echo "🔍 Checking for existing release: ${RELEASE} in namespace: ${NAMESPACE}"
+    HELM_LIST_CMD="helm list -n \"${NAMESPACE}\" -f \"^${RELEASE}$\" -o json"
+    if [ -n "${KUBECONFIG}" ]; then
+      HELM_LIST_CMD="${HELM_LIST_CMD} --kubeconfig ${KUBECONFIG}"
+    fi
+    if RELEASE_INFO=$(eval "${HELM_LIST_CMD}" 2>&1); then
+      if [ -n "${RELEASE_INFO}" ] && [ "${RELEASE_INFO}" != "[]" ]; then
+        CURRENT_VERSION=$(echo "${RELEASE_INFO}" | jq -r '.[0].revision // "0"')
+        echo "✅ Found existing release at revision: ${CURRENT_VERSION}"
+        buildkite-agent meta-data set "${METADATA_CURRENT_VERSION}" "${CURRENT_VERSION}"
+      else
+        echo "ℹ️  No existing deployment found"
+        buildkite-agent meta-data set "${METADATA_CURRENT_VERSION}" "0"
+      fi
+    else
+      echo "⚠️  Warning: helm list failed, assuming no existing deployment"
+      echo "Helm error output: ${RELEASE_INFO}"
+      buildkite-agent meta-data set "${METADATA_CURRENT_VERSION}" "0"
+    fi
+    
+    # Build helm command
+    HELM_CMD="helm upgrade --install ${RELEASE} ${CHART}"
+    HELM_CMD="${HELM_CMD} --namespace ${NAMESPACE}"
+    HELM_CMD="${HELM_CMD} --timeout ${TIMEOUT}"
+    HELM_CMD="${HELM_CMD} --history-max ${HISTORY_MAX}"
+    
+    # Add kubeconfig if specified
+    if [ -n "${KUBECONFIG}" ]; then
+      HELM_CMD="${HELM_CMD} --kubeconfig ${KUBECONFIG}"
+    fi
+    
+    if [ "${WAIT}" = "true" ]; then
+      HELM_CMD="${HELM_CMD} --wait"
+    fi
+    
+    if [ "${ATOMIC}" = "true" ]; then
+      HELM_CMD="${HELM_CMD} --atomic"
+    fi
+    
+    if [ "${CREATE_NAMESPACE}" = "true" ]; then
+      HELM_CMD="${HELM_CMD} --create-namespace"
+    fi
+    
+    if [ "${FORCE}" = "true" ]; then
+      HELM_CMD="${HELM_CMD} --force"
+    fi
+    
+    if [ "${DRY_RUN}" = "true" ]; then
+      HELM_CMD="${HELM_CMD} --dry-run"
+    fi
+    
+    # Add values files
+    if plugin_read_list_into_result VALUES; then
+      for values_file in "${result[@]}"; do
+        HELM_CMD="${HELM_CMD} --values ${values_file}"
+      done
+    fi
+    
+    # Add set values
+    if plugin_read_list_into_result SET; then
+      for set_value in "${result[@]}"; do
+        HELM_CMD="${HELM_CMD} --set ${set_value}"
+      done
+    fi
+    
+    echo "🔧 Executing: ${HELM_CMD}"
+    
+    # Execute deployment
+    if eval "${HELM_CMD}"; then
+      # Get new version from fresh helm list call (revision will have incremented)
+      NEW_HELM_LIST_CMD="helm list -n \"${NAMESPACE}\" -f \"^${RELEASE}$\" -o json"
+      if [ -n "${KUBECONFIG}" ]; then
+        NEW_HELM_LIST_CMD="${NEW_HELM_LIST_CMD} --kubeconfig ${KUBECONFIG}"
+      fi
+      NEW_RELEASE_INFO=$(eval "${NEW_HELM_LIST_CMD}" 2>/dev/null)
+      NEW_VERSION=$(echo "${NEW_RELEASE_INFO}" | jq -r '.[0].revision // "unknown"')
+      echo "✅ Deployment successful! New revision: ${NEW_VERSION}"
+      
+      # Set metadata
+      buildkite-agent meta-data set "${METADATA_RESULT}" "success"
+      buildkite-agent meta-data set "${METADATA_TIMESTAMP}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      
+      # Create annotation
+      buildkite-agent annotate --style "success" --context "helm-deployment-${RELEASE}" \
+        "🚀 **Helm Deployment Successful**<br/>Release: \`${RELEASE}\`<br/>Chart: \`${CHART}\`<br/>Namespace: \`${NAMESPACE}\`<br/>Revision: \`${CURRENT_VERSION}\` → \`${NEW_VERSION}\`<br/>Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    else
+      echo "❌ Deployment failed"
+      buildkite-agent meta-data set "${METADATA_RESULT}" "failed"
+      buildkite-agent meta-data set "${METADATA_TIMESTAMP}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      
+      # Create failure annotation
+      buildkite-agent annotate --style "error" --context "helm-deployment-${RELEASE}" \
+        "❌ **Helm Deployment Failed**<br/>Release: \`${RELEASE}\`<br/>Chart: \`${CHART}\`<br/>Namespace: \`${NAMESPACE}\`<br/>Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      exit 1
+    fi
+    ;;
+    
+  "rollback")
+    echo "🔄 Rolling back deployment..."
+    
+    # Get current version for annotation
+    ROLLBACK_HELM_LIST_CMD="helm list -n \"${NAMESPACE}\" -f \"^${RELEASE}$\" -o json"
+    if [ -n "${KUBECONFIG}" ]; then
+      ROLLBACK_HELM_LIST_CMD="${ROLLBACK_HELM_LIST_CMD} --kubeconfig ${KUBECONFIG}"
+    fi
+    if CURRENT_VERSION_JSON=$(eval "${ROLLBACK_HELM_LIST_CMD}" 2>/dev/null); then
+      CURRENT_VERSION=$(echo "${CURRENT_VERSION_JSON}" | jq -r '.[0].revision // "unknown"' 2>/dev/null || echo "unknown")
+    else
+      CURRENT_VERSION="unknown"
+    fi
+    
+    # Build rollback command
+    ROLLBACK_CMD="helm rollback ${RELEASE}"
+    ROLLBACK_CMD="${ROLLBACK_CMD} --namespace ${NAMESPACE}"
+    ROLLBACK_CMD="${ROLLBACK_CMD} --timeout ${TIMEOUT}"
+    
+    # Add kubeconfig if specified
+    if [ -n "${KUBECONFIG}" ]; then
+      ROLLBACK_CMD="${ROLLBACK_CMD} --kubeconfig ${KUBECONFIG}"
+    fi
+    
+    if [ "${WAIT}" = "true" ]; then
+      ROLLBACK_CMD="${ROLLBACK_CMD} --wait"
+    fi
+    
+    if [ -n "${REVISION}" ]; then
+      ROLLBACK_CMD="${ROLLBACK_CMD} ${REVISION}"
+      echo "Rolling back to revision: ${REVISION}"
+    else
+      echo "Rolling back to previous revision"
+    fi
+    
+    if [ "${DRY_RUN}" = "true" ]; then
+      ROLLBACK_CMD="${ROLLBACK_CMD} --dry-run"
+    fi
+    
+    echo "🔧 Executing: ${ROLLBACK_CMD}"
+    
+    # Execute rollback
+    if eval "${ROLLBACK_CMD}"; then
+      # Use a more robust way to get the rollback version to avoid SIGPIPE
+      FINAL_HELM_LIST_CMD="helm list -n \"${NAMESPACE}\" -f \"^${RELEASE}$\" -o json"
+      if [ -n "${KUBECONFIG}" ]; then
+        FINAL_HELM_LIST_CMD="${FINAL_HELM_LIST_CMD} --kubeconfig ${KUBECONFIG}"
+      fi
+      if ROLLBACK_VERSION_JSON=$(eval "${FINAL_HELM_LIST_CMD}" 2>/dev/null); then
+        ROLLBACK_VERSION=$(echo "${ROLLBACK_VERSION_JSON}" | jq -r '.[0].revision // "unknown"' 2>/dev/null || echo "unknown")
+      else
+        ROLLBACK_VERSION="unknown"
+      fi
+      echo "✅ Rollback successful! Current revision: ${ROLLBACK_VERSION}"
+      
+      # Update metadata
+      buildkite-agent meta-data set "${METADATA_RESULT}" "rollback_success"
+      buildkite-agent meta-data set "${METADATA_TIMESTAMP}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      
+      # Update annotation to indicate rollback
+      buildkite-agent annotate --style "warning" --context "helm-deployment-${RELEASE}" \
+        "🔄 **Helm Rollback Successful**<br/>Release: \`${RELEASE}\`<br/>Namespace: \`${NAMESPACE}\`<br/>Revision: \`${CURRENT_VERSION}\` → \`${ROLLBACK_VERSION}\`<br/>Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    else
+      echo "❌ Rollback failed"
+      buildkite-agent meta-data set "${METADATA_RESULT}" "rollback_failed"
+      buildkite-agent meta-data set "${METADATA_TIMESTAMP}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      
+      # Create rollback failure annotation
+      buildkite-agent annotate --style "error" --context "helm-deployment-${RELEASE}" \
+        "❌ **Helm Rollback Failed**<br/>Release: \`${RELEASE}\`<br/>Namespace: \`${NAMESPACE}\`<br/>Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      exit 1
+    fi
+    ;;
+esac
+
+echo "🎉 Helm operation completed successfully!"
