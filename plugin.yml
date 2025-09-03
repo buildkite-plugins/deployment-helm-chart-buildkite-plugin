@@ -1,0 +1,77 @@
+name: Deployment Helm Chart
+description: Deploy and rollback Helm charts with version tracking and build metadata
+author: https://github.com/Mykematt
+requirements:
+  - bash
+  - helm
+  - jq
+configuration:
+  properties:
+    mode:
+      type: string
+      description: "Operation mode: 'deploy' or 'rollback'"
+      enum: ["deploy", "rollback"]
+    chart:
+      type: string
+      description: "Helm chart name or path (required for deploy mode)"
+    release:
+      type: string
+      description: "Helm release name"
+    namespace:
+      type: string
+      description: "Kubernetes namespace for the deployment"
+      default: "default"
+    values:
+      type: array
+      description: "Array of values files to use with helm"
+      items:
+        type: string
+    set:
+      type: array
+      description: "Array of key=value pairs to set via --set"
+      items:
+        type: string
+    kubeconfig:
+      type: string
+      description: "Path to kubeconfig file (optional)"
+    timeout:
+      type: string
+      description: "Timeout for helm operations"
+      default: "300s"
+    wait:
+      type: boolean
+      description: "Wait for deployment to complete"
+      default: true
+    atomic:
+      type: boolean
+      description: "If set, upgrade process rolls back changes made in case of failed upgrade"
+      default: true
+    create_namespace:
+      type: boolean
+      description: "Create namespace if it doesn't exist"
+      default: false
+    dry_run:
+      type: boolean
+      description: "Simulate deployment without making changes"
+      default: false
+    revision:
+      type: number
+      description: "Specific revision to rollback to (for rollback mode)"
+    repo_url:
+      type: string
+      description: "Helm repository URL to add before deployment"
+    repo_name:
+      type: string
+      description: "Name for the Helm repository"
+    force:
+      type: boolean
+      description: "Force resource updates through a replacement strategy"
+      default: false
+    history_max:
+      type: number
+      description: "Maximum number of revisions saved per release"
+      default: 10
+  required:
+    - mode
+    - release
+  additionalProperties: false
