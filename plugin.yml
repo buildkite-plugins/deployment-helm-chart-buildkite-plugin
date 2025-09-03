@@ -1,6 +1,7 @@
-name: Deployment Helm Chart
-description: Deploy and rollback Helm charts with version tracking and build metadata
-author: https://github.com/Mykematt
+name: deployment-helm-chart
+description: "Deploy and rollback Helm charts with version tracking and build metadata"
+author: "https://github.com/buildkite-plugins"
+version: "v1.0.0"
 requirements:
   - bash
   - helm
